@@ -132,7 +132,27 @@ class MarketDataFetcher:
         stored_prices = self.db.get_latest_daily_prices(symbols)
         formatted = self._format_stored_prices(stored_prices, symbols)
 
-        # Fallback to most recent live snapshot if no stored data yet
+        target_symbols = symbols or [stock['symbol'] for stock in self._get_configured_stocks()]
+        missing_symbols = [sym for sym in target_symbols if sym not in formatted]
+
+        if missing_symbols:
+            live_prices = self.get_current_prices(missing_symbols)
+            if live_prices:
+                price_date = now.strftime('%Y-%m-%d')
+                if not self._last_live_prices:
+                    self._last_live_prices = {}
+                for symbol, payload in live_prices.items():
+                    payload['source'] = 'live_fallback'
+                    payload['price_date'] = price_date
+                    formatted[symbol] = payload
+                    self._last_live_prices[symbol] = payload.copy()
+                    try:
+                        self.db.upsert_daily_price(symbol, float(payload.get('price', 0)), price_date)
+                    except Exception as err:
+                        print(f'[WARN] Failed to persist fallback price for {symbol}: {err}')
+                self._last_live_date = now.date()
+
+        # Fallback to most recent live snapshot if still no data
         if not formatted and self._last_live_prices:
             fallback: Dict[str, Dict] = {}
             for symbol, payload in self._last_live_prices.items():
@@ -140,8 +160,8 @@ class MarketDataFetcher:
                     continue
                 fallback[symbol] = {
                     **payload,
-                    'source': 'previous_live',
-                    'price_date': self._last_live_date.strftime('%Y-%m-%d') if self._last_live_date else None
+                    'source': payload.get('source', 'previous_live'),
+                    'price_date': payload.get('price_date') or (self._last_live_date.strftime('%Y-%m-%d') if self._last_live_date else None)
                 }
             return fallback
 

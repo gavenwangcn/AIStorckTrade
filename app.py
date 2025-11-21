@@ -33,6 +33,31 @@ trading_engines = {}
 auto_trading = getattr(app_config, 'AUTO_TRADING', True)
 TRADE_FEE_RATE = getattr(app_config, 'TRADE_FEE_RATE', 0.001)
 
+
+def init_trading_engine_for_model(model_id: int):
+    """Initialize trading engine for a model if possible."""
+    model = db.get_model(model_id)
+    if not model:
+        return None, 'Model not found'
+
+    provider = db.get_provider(model['provider_id'])
+    if not provider:
+        return None, 'Provider not found'
+
+    trading_engines[model_id] = TradingEngine(
+        model_id=model_id,
+        db=db,
+        market_fetcher=market_fetcher,
+        ai_trader=AITrader(
+            provider_type=provider.get('provider_type', 'openai'),
+            api_key=provider['api_key'],
+            api_url=provider['api_url'],
+            model_name=model['model_name']
+        ),
+        trade_fee_rate=TRADE_FEE_RATE
+    )
+    return trading_engines[model_id], None
+
 def get_tracked_symbols():
     symbols = db.get_stock_symbols()
     if not symbols:
@@ -256,7 +281,8 @@ def get_portfolio(model_id):
     
     return jsonify({
         'portfolio': portfolio,
-        'account_value_history': account_value
+        'account_value_history': account_value,
+        'auto_trading_enabled': bool(model.get('auto_trading_enabled', 1))
     })
 
 @app.route('/api/models/<int:model_id>/trades', methods=['GET'])
@@ -356,33 +382,42 @@ def get_market_prices():
 @app.route('/api/models/<int:model_id>/execute', methods=['POST'])
 def execute_trading(model_id):
     if model_id not in trading_engines:
-        model = db.get_model(model_id)
-        if not model:
-            return jsonify({'error': 'Model not found'}), 404
+        engine, error = init_trading_engine_for_model(model_id)
+        if error:
+            return jsonify({'error': error}), 404
+    else:
+        engine = trading_engines[model_id]
 
-        # Get provider info
-        provider = db.get_provider(model['provider_id'])
-        if not provider:
-            return jsonify({'error': 'Provider not found'}), 404
+    # Manual执行视为重新开启自动交易
+    db.set_model_auto_trading(model_id, True)
 
-        trading_engines[model_id] = TradingEngine(
-            model_id=model_id,
-            db=db,
-            market_fetcher=market_fetcher,
-            ai_trader=AITrader(
-                provider_type=provider.get('provider_type', 'openai'),
-                api_key=provider['api_key'],
-                api_url=provider['api_url'],
-                model_name=model['model_name']
-            ),
-            trade_fee_rate=TRADE_FEE_RATE  # 新增：传入费率
-        )
-    
     try:
-        result = trading_engines[model_id].execute_trading_cycle()
+        result = engine.execute_trading_cycle()
+        result['auto_trading_enabled'] = True
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/models/<int:model_id>/auto-trading', methods=['POST'])
+def set_model_auto_trading(model_id):
+    data = request.json or {}
+    if 'enabled' not in data:
+        return jsonify({'error': 'enabled flag is required'}), 400
+
+    model = db.get_model(model_id)
+    if not model:
+        return jsonify({'error': 'Model not found'}), 404
+
+    enabled = bool(data.get('enabled'))
+    success = db.set_model_auto_trading(model_id, enabled)
+    if not success:
+        return jsonify({'error': 'Failed to update model status'}), 500
+
+    if enabled and model_id not in trading_engines:
+        init_trading_engine_for_model(model_id)
+
+    return jsonify({'model_id': model_id, 'auto_trading_enabled': enabled})
 
 def trading_loop():
     print("[INFO] Trading loop started")
@@ -400,6 +435,10 @@ def trading_loop():
             
             for model_id, engine in list(trading_engines.items()):
                 try:
+                    if not db.is_model_auto_trading_enabled(model_id):
+                        print(f"[SKIP] Model {model_id} auto trading paused")
+                        continue
+                    
                     print(f"\n[EXEC] Model {model_id}")
                     result = engine.execute_trading_cycle()
                     

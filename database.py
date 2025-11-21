@@ -53,10 +53,17 @@ class Database:
                 provider_id INTEGER,
                 model_name TEXT NOT NULL,
                 initial_capital REAL DEFAULT 10000,
+                auto_trading_enabled INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (provider_id) REFERENCES providers(id)
             )
         ''')
+
+        # Ensure auto_trading_enabled column exists (legacy support)
+        cursor.execute("PRAGMA table_info(models)")
+        model_columns = [row[1] for row in cursor.fetchall()]
+        if 'auto_trading_enabled' not in model_columns:
+            cursor.execute("ALTER TABLE models ADD COLUMN auto_trading_enabled INTEGER DEFAULT 1")
         
         # Portfolios table
         cursor.execute('''
@@ -677,6 +684,35 @@ class Database:
         row = cursor.fetchone()
         conn.close()
         return dict(row) if row else None
+
+    def set_model_auto_trading(self, model_id: int, enabled: bool) -> bool:
+        """Enable or disable auto trading for a model"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                UPDATE models
+                SET auto_trading_enabled = ?
+                WHERE id = ?
+            ''', (1 if enabled else 0, model_id))
+            conn.commit()
+            return cursor.rowcount > 0
+        except Exception as exc:
+            print(f"[ERROR] Failed to update auto trading flag for model {model_id}: {exc}")
+            return False
+        finally:
+            conn.close()
+
+    def is_model_auto_trading_enabled(self, model_id: int) -> bool:
+        """Check auto trading flag for a model"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT auto_trading_enabled FROM models WHERE id = ?', (model_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row is None:
+            return False
+        return bool(row['auto_trading_enabled'])
 
     def get_all_providers(self) -> List[Dict]:
         """Get all API providers"""

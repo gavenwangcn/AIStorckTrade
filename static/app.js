@@ -2,6 +2,7 @@ class TradingApp {
     constructor() {
         this.currentModelId = null;
         this.isAggregatedView = false;
+        this.currentModelAutoTradingEnabled = true;
         this.chart = null;
         this.refreshIntervals = {
             market: null,
@@ -25,6 +26,30 @@ class TradingApp {
         } else {
             executeBtn.disabled = false;
             executeBtn.title = '执行当前模型的交易周期';
+        }
+
+        this.updateAutoTradingButtonState();
+    }
+
+    updateAutoTradingButtonState() {
+        const pauseBtn = document.getElementById('pauseAutoBtn');
+        if (!pauseBtn) return;
+
+        if (this.isAggregatedView || !this.currentModelId) {
+            pauseBtn.disabled = true;
+            pauseBtn.title = '请选择对应的交易模型';
+            pauseBtn.innerHTML = '<i class="bi bi-pause-circle"></i> 关闭交易';
+            return;
+        }
+
+        if (this.currentModelAutoTradingEnabled) {
+            pauseBtn.disabled = false;
+            pauseBtn.title = '暂停该模型的自动化交易';
+            pauseBtn.innerHTML = '<i class="bi bi-pause-circle"></i> 关闭交易';
+        } else {
+            pauseBtn.disabled = true;
+            pauseBtn.title = '该模型自动交易已关闭，点击执行交易可重新开启';
+            pauseBtn.innerHTML = '<i class="bi bi-stop-circle"></i> 已关闭';
         }
     }
 
@@ -54,6 +79,50 @@ class TradingApp {
         } finally {
             executeBtn.innerHTML = originalContent;
             executeBtn.disabled = this.isAggregatedView || !this.currentModelId;
+        }
+    }
+
+    async pauseAutoTrading() {
+        if (this.isAggregatedView || !this.currentModelId) {
+            alert('请选择对应的交易模型');
+            return;
+        }
+
+        if (!this.currentModelAutoTradingEnabled) {
+            alert('该模型自动交易已关闭，执行交易可重新开启');
+            return;
+        }
+
+        const pauseBtn = document.getElementById('pauseAutoBtn');
+        const originalContent = pauseBtn ? pauseBtn.innerHTML : null;
+        if (pauseBtn) {
+            pauseBtn.disabled = true;
+            pauseBtn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> 关闭中...';
+        }
+
+        try {
+            const response = await fetch(`/api/models/${this.currentModelId}/auto-trading`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: false })
+            });
+            const data = await response.json();
+
+            if (!response.ok || data.error) {
+                throw new Error(data.error || '关闭失败');
+            }
+
+            this.currentModelAutoTradingEnabled = false;
+            alert('该模型的自动化交易已关闭');
+            await this.loadModelData();
+        } catch (error) {
+            console.error('Failed to pause auto trading:', error);
+            alert(error.message || '关闭自动化交易失败');
+        } finally {
+            if (pauseBtn) {
+                pauseBtn.innerHTML = originalContent || '<i class="bi bi-pause-circle"></i> 关闭交易';
+            }
+            this.updateAutoTradingButtonState();
         }
     }
 
@@ -204,6 +273,7 @@ class TradingApp {
 
         // Manual execute
         document.getElementById('executeBtn').addEventListener('click', () => this.executeCurrentModel());
+        document.getElementById('pauseAutoBtn').addEventListener('click', () => this.pauseAutoTrading());
 
         // Settings Modal
         document.getElementById('settingsBtn').addEventListener('click', () => this.showSettingsModal());
@@ -285,6 +355,8 @@ class TradingApp {
         await this.loadAggregatedData();
         this.hideTabsInAggregatedView();
         this.updateExecuteButtonState();
+        this.currentModelAutoTradingEnabled = false;
+        this.updateAutoTradingButtonState();
     }
 
     async selectModel(modelId) {
@@ -300,19 +372,25 @@ class TradingApp {
         if (!this.currentModelId) return;
 
         try {
-            const [portfolio, trades, conversations] = await Promise.all([
+            const [portfolioPayload, trades, conversations] = await Promise.all([
                 fetch(`/api/models/${this.currentModelId}/portfolio`).then(r => r.json()),
                 fetch(`/api/models/${this.currentModelId}/trades?limit=50`).then(r => r.json()),
                 fetch(`/api/models/${this.currentModelId}/conversations?limit=20`).then(r => r.json())
             ]);
 
+            const { portfolio, account_value_history, auto_trading_enabled } = portfolioPayload;
+
+            this.currentModelAutoTradingEnabled = Boolean(auto_trading_enabled);
+            this.updateAutoTradingButtonState();
+
             this.updateStats(portfolio.portfolio, false);
-            this.updateSingleModelChart(portfolio.account_value_history, portfolio.portfolio.total_value);
+            this.updateSingleModelChart(account_value_history, portfolio.portfolio.total_value);
             this.updatePositions(portfolio.portfolio.positions, false);
             this.updateTrades(trades);
             this.updateConversations(conversations);
         } catch (error) {
             console.error('Failed to load model data:', error);
+            this.updateAutoTradingButtonState();
         }
     }
 
@@ -325,8 +403,10 @@ class TradingApp {
             this.updateMultiModelChart(data.chart_data);
             // Skip positions, trades, and conversations in aggregated view
             this.hideTabsInAggregatedView();
+            this.updateAutoTradingButtonState();
         } catch (error) {
             console.error('Failed to load aggregated data:', error);
+            this.updateAutoTradingButtonState();
         }
     }
 
